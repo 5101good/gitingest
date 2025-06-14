@@ -1,0 +1,32 @@
+version: '3.8'
+
+services:
+  gitingest-x:
+    build: .
+    container_name: gitingest-x
+    ports:
+      - "8000:8000"
+    environment:
+      - ALLOWED_HOSTS=localhost,127.0.0.1,gitingest-x.local
+      - PYTHONUNBUFFERED=1
+      - PYTHONDONTWRITEBYTECODE=1
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    volumes:
+      # 可选：挂载临时目录以提高性能
+      - gitingest_tmp:/tmp
+    networks:
+      - gitingest-network
+
+volumes:
+  gitingest_tmp:
+    driver: local
+
+networks:
+  gitingest-network:
+    driver: bridge 

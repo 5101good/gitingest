@@ -131,45 +131,254 @@ curl "http://localhost:8000/api/v1/health"
 
 ## 🐳 Docker 部署详解
 
+### Dockerfile 特性
+
+当前 Dockerfile 采用多阶段构建，具有以下特性：
+
+- **多阶段构建**: 分离构建和运行环境，减小镜像体积
+- **Python 3.12**: 基于官方 Python 3.12 slim 镜像
+- **安全性**: 使用非 root 用户 (appuser) 运行应用
+- **依赖优化**: 利用 Docker 缓存层优化构建速度
+- **必要工具**: 预装 Git 和 curl 用于仓库克隆和健康检查
+
 ### 环境变量
 
 ```bash
 # 允许的主机名（可选）
 ALLOWED_HOSTS="example.com,localhost,127.0.0.1"
+
+# Python 环境变量（已在 Dockerfile 中设置）
+PYTHONUNBUFFERED=1
+PYTHONDONTWRITEBYTECODE=1
 ```
 
-### Docker Compose
+### Docker Compose 配置
+
+项目已包含 `docker-compose.yml` 文件，提供完整的容器化部署方案：
 
 ```yaml
 version: '3.8'
 services:
   gitingest-x:
     build: .
+    container_name: gitingest-x
     ports:
       - "8000:8000"
     environment:
-      - ALLOWED_HOSTS=localhost,127.0.0.1,your-domain.com
+      - ALLOWED_HOSTS=localhost,127.0.0.1,gitingest-x.local
+      - PYTHONUNBUFFERED=1
+      - PYTHONDONTWRITEBYTECODE=1
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/health"]
       interval: 30s
       timeout: 10s
       retries: 3
+      start_period: 40s
+    volumes:
+      - gitingest_tmp:/tmp
+    networks:
+      - gitingest-network
+
+volumes:
+  gitingest_tmp:
+    driver: local
+
+networks:
+  gitingest-network:
+    driver: bridge
+```
+
+### 持久化存储配置
+
+#### 1. 默认卷挂载
+
+默认配置包含临时文件持久化，用于存储克隆的仓库和处理过程中的临时文件：
+
+```yaml
+volumes:
+  - gitingest_tmp:/tmp  # 容器内 /tmp 目录持久化
+```
+
+**优势**：
+- 提高重复访问相同仓库的性能
+- 避免重复克隆已处理的仓库
+- 容器重启后保留临时数据
+
+#### 2. 扩展持久化配置
+
+如需更多持久化选项，可以修改 `docker-compose.yml`：
+
+```yaml
+services:
+  gitingest-x:
+    # ... 其他配置 ...
+    volumes:
+      # 临时文件持久化（推荐）
+      - gitingest_tmp:/tmp
+      
+      # 可选：日志持久化
+      - ./logs:/app/logs
+      
+      # 可选：缓存持久化（提高重复访问性能）
+      - gitingest_cache:/app/cache
+      
+      # 可选：配置文件挂载（只读）
+      - ./config:/app/config:ro
+
+volumes:
+  gitingest_tmp:
+    driver: local
+  gitingest_cache:
+    driver: local
+```
+
+#### 3. 主机目录挂载
+
+如果希望直接挂载主机目录进行数据管理：
+
+```yaml
+services:
+  gitingest-x:
+    volumes:
+      # 挂载主机目录到容器
+      - /host/data/tmp:/tmp
+      - /host/data/logs:/app/logs
+      - /host/data/cache:/app/cache
+```
+
+**注意事项**：
+- 确保主机目录存在且有适当权限
+- 容器使用 UID 1000 运行，确保目录权限正确
+
+#### 4. 数据卷管理
+
+```bash
+# 查看所有卷
+docker volume ls
+
+# 查看特定卷详情
+docker volume inspect gitingest_gitingest_tmp
+
+# 清理未使用的卷
+docker volume prune
+
+# 备份卷数据
+docker run --rm \
+  -v gitingest_gitingest_tmp:/data \
+  -v $(pwd):/backup \
+  alpine tar czf /backup/gitingest_tmp_backup.tar.gz -C /data .
+
+# 恢复卷数据
+docker run --rm \
+  -v gitingest_gitingest_tmp:/data \
+  -v $(pwd):/backup \
+  alpine tar xzf /backup/gitingest_tmp_backup.tar.gz -C /data
+```
+
+#### 5. 性能优化配置
+
+对于高频使用场景，可以配置更大的临时存储：
+
+```yaml
+services:
+  gitingest-x:
+    volumes:
+      - gitingest_tmp:/tmp
+    tmpfs:
+      # 使用内存文件系统加速小文件操作
+      - /app/temp:size=512M,uid=1000,gid=1000
 ```
 
 ### 生产部署
 
+#### Docker Compose 部署（推荐）
+
 ```bash
-# 使用 Docker Compose
+# 启动服务
 docker-compose up -d
 
-# 或直接运行
+# 查看服务状态
+docker-compose ps
+
+# 查看实时日志
+docker-compose logs -f gitingest-x
+
+# 查看最近日志
+docker-compose logs --tail=100 gitingest-x
+
+# 重启服务
+docker-compose restart gitingest-x
+
+# 更新服务（重新构建镜像）
+docker-compose up -d --build
+
+# 停止服务
+docker-compose down
+
+# 停止服务并删除卷（谨慎使用）
+docker-compose down -v
+```
+
+#### 服务监控和维护
+
+```bash
+# 查看容器资源使用情况
+docker stats gitingest-x
+
+# 进入容器进行调试
+docker-compose exec gitingest-x /bin/bash
+
+# 查看容器详细信息
+docker inspect gitingest-x
+
+# 检查健康状态
+docker-compose exec gitingest-x curl -f http://localhost:8000/api/v1/health
+```
+
+#### 直接 Docker 运行
+
+```bash
+# 方法1: 基础运行
 docker run -d \
   --name gitingest-x \
   -p 8000:8000 \
   -e ALLOWED_HOSTS="your-domain.com,localhost" \
   --restart unless-stopped \
+  --user 1000:1000 \
   gitingest-x
+
+# 方法2: 带持久化存储
+docker run -d \
+  --name gitingest-x \
+  -p 8000:8000 \
+  -e ALLOWED_HOSTS="your-domain.com,localhost" \
+  -v gitingest_data:/tmp \
+  --restart unless-stopped \
+  gitingest-x
+
+# 方法3: 带自定义网络
+docker network create gitingest-network
+docker run -d \
+  --name gitingest-x \
+  -p 8000:8000 \
+  -e ALLOWED_HOSTS="your-domain.com,localhost" \
+  --network gitingest-network \
+  --restart unless-stopped \
+  gitingest-x
+```
+
+### 构建优化
+
+```bash
+# 构建时指定平台（适用于多架构部署）
+docker build --platform linux/amd64 -t gitingest-x .
+
+# 使用 BuildKit 加速构建
+DOCKER_BUILDKIT=1 docker build -t gitingest-x .
+
+# 清理构建缓存
+docker builder prune
 ```
 
 ## 💻 使用示例
@@ -225,7 +434,6 @@ console.log(data.success ? data.data.summary : data.error);
 - 📖 [完整 API 文档](docs/API_GUIDE.md)
 - 🔗 [交互式 API 文档](http://localhost:8000/docs)
 - 💻 [使用示例代码](examples/api_usage_examples.py)
-- 🧪 [快速测试脚本](scripts/test_api_quick.py)
 
 ## 🤝 贡献
 
